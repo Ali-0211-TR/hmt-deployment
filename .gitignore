@@ -1,0 +1,61 @@
+# Environment variables
+.env*
+!.env.example
+
+# Dependencies
+node_modules/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# Database
+database/
+*.db
+*.sqlite
+
+# Temporary folders
+tmp/
+temp/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker
+.dockerignore
+
+# Backup files
+backup/
+*.backup
+*.sql.gz
+
+# SSL certificates
+ssl/
+certs/
+*.pem
+*.key
+*.crt

@@ -1,0 +1,6 @@
+[submodule "hmt-email-service"]
+	path = hmt-email-service
+	url = git@github.com:Ali-0211-TR/hmt-email-service.git
+[submodule "hmt_demo_backend"]
+	path = hmt_demo_backend
+	url = git@github.com:handmandetravel/hmt_demo_backend.git

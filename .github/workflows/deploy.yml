@@ -1,0 +1,348 @@
+name: HMT Deployment CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      force_rebuild:
+        description: 'Force rebuild all services'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME_API_GATEWAY: ${{ github.repository }}/api-gateway
+  IMAGE_NAME_EMAIL_SERVICE: ${{ github.repository }}/email-service
+
+jobs:
+  # Detect changes in submodules
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api-gateway-changed: ${{ steps.changes.outputs.api-gateway }}
+      email-service-changed: ${{ steps.changes.outputs.email-service }}
+      deployment-changed: ${{ steps.changes.outputs.deployment }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Detect changes
+        uses: dorny/paths-filter@v2
+        id: changes
+        with:
+          filters: |
+            api-gateway:
+              - 'services/hmt-apigateway/**'
+            email-service:
+              - 'services/hmt-email-service/**'
+            deployment:
+              - 'docker-compose*.yml'
+              - 'configs/**'
+              - 'scripts/**'
+              - '.env.example'
+
+  # Test and build API Gateway
+  build-api-gateway:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.api-gateway-changed == 'true' || github.event.inputs.force_rebuild == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: services/hmt-apigateway/package-lock.json
+
+      - name: Install dependencies
+        working-directory: services/hmt-apigateway
+        run: npm ci
+
+      - name: Run linter
+        working-directory: services/hmt-apigateway
+        run: npm run lint
+
+      - name: Run tests
+        working-directory: services/hmt-apigateway
+        run: npm run test
+
+      - name: Run build
+        working-directory: services/hmt-apigateway
+        run: npm run build
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_API_GATEWAY }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: services/hmt-apigateway
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Test and build Email Service
+  build-email-service:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.email-service-changed == 'true' || github.event.inputs.force_rebuild == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: services/hmt-email-service/package-lock.json
+
+      - name: Install dependencies
+        working-directory: services/hmt-email-service
+        run: npm ci
+
+      - name: Run linter
+        working-directory: services/hmt-email-service
+        run: npm run lint
+
+      - name: Run tests
+        working-directory: services/hmt-email-service
+        run: npm run test
+
+      - name: Run build
+        working-directory: services/hmt-email-service
+        run: npm run build
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_EMAIL_SERVICE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: services/hmt-email-service
+          target: production
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Security scanning
+  security-scan:
+    needs: [build-api-gateway, build-email-service]
+    if: always() && (needs.build-api-gateway.result == 'success' || needs.build-email-service.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run Trivy vulnerability scanner for API Gateway
+        if: needs.build-api-gateway.result == 'success'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_API_GATEWAY }}:latest
+          format: 'sarif'
+          output: 'trivy-api-gateway.sarif'
+
+      - name: Upload Trivy scan results for API Gateway
+        if: needs.build-api-gateway.result == 'success'
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-api-gateway.sarif'
+
+      - name: Run Trivy vulnerability scanner for Email Service
+        if: needs.build-email-service.result == 'success'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_EMAIL_SERVICE }}:latest
+          format: 'sarif'
+          output: 'trivy-email-service.sarif'
+
+      - name: Upload Trivy scan results for Email Service
+        if: needs.build-email-service.result == 'success'
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-email-service.sarif'
+
+  # Deploy to staging
+  deploy-staging:
+    needs: [detect-changes, build-api-gateway, build-email-service]
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
+
+      - name: Deploy to staging
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.STAGING_USER }}@${{ secrets.STAGING_HOST }} << 'EOF'
+            cd /opt/hmt-deployment
+            git pull origin develop
+            git submodule update --recursive --remote
+            ./scripts/backup.sh
+            docker-compose pull
+            docker-compose up -d
+            ./scripts/health-check.sh
+          EOF
+
+      - name: Notify Slack on success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: '🚀 Staging deployment successful!'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: '❌ Staging deployment failed!'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Deploy to production
+  deploy-production:
+    needs: [detect-changes, build-api-gateway, build-email-service, security-scan]
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.PRODUCTION_SSH_KEY }}
+
+      - name: Create deployment backup
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PRODUCTION_USER }}@${{ secrets.PRODUCTION_HOST }} << 'EOF'
+            cd /opt/hmt-deployment
+            ./scripts/backup.sh
+          EOF
+
+      - name: Deploy to production
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PRODUCTION_USER }}@${{ secrets.PRODUCTION_HOST }} << 'EOF'
+            cd /opt/hmt-deployment
+            git pull origin main
+            git submodule update --recursive --remote
+            docker-compose pull
+            docker-compose up -d
+            sleep 60
+            ./scripts/health-check.sh
+          EOF
+
+      - name: Post-deployment verification
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PRODUCTION_USER }}@${{ secrets.PRODUCTION_HOST }} << 'EOF'
+            cd /opt/hmt-deployment
+            ./scripts/health-check.sh
+            docker-compose ps
+          EOF
+
+      - name: Notify Slack on success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: '🎉 Production deployment successful!'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: '🚨 Production deployment failed! Manual intervention required.'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PRODUCTION_USER }}@${{ secrets.PRODUCTION_HOST }} << 'EOF'
+            cd /opt/hmt-deployment
+            echo "Rolling back to previous version..."
+            ./scripts/restore.sh --restore-path $(find backup/ -type d -name "backup_*" | sort -r | head -n2 | tail -n1)
+          EOF

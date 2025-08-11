@@ -1,0 +1,76 @@
+name: Backup
+
+on:
+  schedule:
+    # Daily backup at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to backup'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ github.event_name == 'schedule' && ['staging', 'production'] || [github.event.inputs.environment] }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create backup for ${{ matrix.environment }}
+        run: |
+          if [ "${{ matrix.environment }}" = "staging" ]; then
+            HOST="${{ secrets.STAGING_HOST }}"
+            USER="${{ secrets.STAGING_USER }}"
+            SSH_KEY="${{ secrets.STAGING_SSH_KEY }}"
+          else
+            HOST="${{ secrets.PRODUCTION_HOST }}"
+            USER="${{ secrets.PRODUCTION_USER }}"
+            SSH_KEY="${{ secrets.PRODUCTION_SSH_KEY }}"
+          fi
+          
+          # Setup SSH
+          echo "$SSH_KEY" > ssh_key
+          chmod 600 ssh_key
+          
+          # Create backup
+          ssh -i ssh_key -o StrictHostKeyChecking=no $USER@$HOST << 'EOF'
+            cd /opt/hmt-deployment
+            ./scripts/backup.sh > backup.log 2>&1
+            exit_code=$?
+            cat backup.log
+            
+            # Upload to cloud storage if configured
+            if [ -n "${BACKUP_UPLOAD_CMD:-}" ]; then
+              echo "Uploading backup to cloud storage..."
+              eval "$BACKUP_UPLOAD_CMD"
+            fi
+            
+            exit $exit_code
+          EOF
+
+      - name: Notify on success
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: '✅ Backup completed successfully for ${{ matrix.environment }} environment'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: '❌ Backup failed for ${{ matrix.environment }} environment!'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
